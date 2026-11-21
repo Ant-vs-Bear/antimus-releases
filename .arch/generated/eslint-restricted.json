@@ -1,0 +1,8 @@
+{
+ "no-restricted-imports": [
+  "error",
+  {
+   "paths": []
+  }
+ ]
+}

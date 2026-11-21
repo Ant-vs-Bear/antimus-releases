@@ -1,0 +1,8 @@
+{
+ "forbidden": [],
+ "options": {
+  "doNotFollow": {
+   "path": "node_modules"
+  }
+ }
+}
