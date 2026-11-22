@@ -1,0 +1,3 @@
+# Vendored architecture kit: a generated copy, not this repository's code.
+lint.select = []
+format.exclude = ["*.py"]

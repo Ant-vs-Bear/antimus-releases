@@ -11,6 +11,7 @@ from pathlib import Path
 
 import arch_config as ac
 import arch_literals as lit
+import arch_scan as sc
 
 BIG_REPO_FILES = 50
 OPEN, CLOSE = "([{", ")]}"
@@ -253,11 +254,28 @@ def gap(repos=None, runner=gh):
     return out
 
 
+VENDOR_RUFF = (
+    "# Vendored architecture kit: a generated copy, not this repository's code.\n"
+    'lint.select = []\nformat.exclude = ["*.py"]\n'
+)
+
+
+def open_pr(repo, runner=gh):
+    """True when a pull request from the rollout branch is already open in `repo`."""
+    code, out = runner(
+        "pr", "list", "--repo", f"{ORG}/{repo}", "--head", BRANCH, "--state", "open", "--json", "number"
+    )  # fmt: skip
+    return code == 0 and out.strip() not in ("", "[]")
+
+
 def apply(rows, runner=gh):
     """Open one held pull request per gap repository. Returns [{repo, result}]."""
     results = []
     for row in rows:
         repo = row["repo"]
+        if open_pr(repo, runner):
+            results.append({"repo": repo, "result": "rollout PR already open"})
+            continue
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp) / repo
             if subprocess.run(["git", "clone", "-q", "--depth", "1", f"https://github.com/{ORG}/{repo}.git", str(d)],
@@ -276,6 +294,12 @@ def apply(rows, runner=gh):
                 text=True,
                 check=False,
             )
+            if (
+                not adopted.returncode
+            ):  # a repository's own ruff hooks must not lint the generated kit
+                (d / ".arch" / "ruff.toml").write_text(VENDOR_RUFF)
+                with open(d / ".arch" / "decisions.log", "a") as f:
+                    f.write(f"{ac.today().isoformat()} {ADOPT_DECISION}\n")
             if adopted.returncode:
                 results.append(
                     {
@@ -370,6 +394,64 @@ def extract_all(here, out=print):
     return 1 if bad else 0
 
 
+def refresh(rows):
+    """Bring each open rollout branch up to the current kit: decision logged, empty register baselined, kit synced.
+    Plain pushes onto the branch of the open held PR; never merges. Returns [{repo, result}]."""
+    import json
+
+    results = []
+    for row in rows:
+        repo = row["repo"]
+        if not open_pr(repo):
+            results.append({"repo": repo, "result": "no open rollout PR"})
+            continue
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / repo
+            if subprocess.run(["git", "clone", "-q", "--depth", "1", "-b", BRANCH, f"https://github.com/{ORG}/{repo}.git", str(d)], capture_output=True, check=False).returncode:  # fmt: skip
+                results.append({"repo": repo, "result": "clone failed"})
+                continue
+            run = subprocess.run([sys.executable, str(KIT / "arch_kit.py"), "adopt"], cwd=d, capture_output=True, text=True, check=False)  # fmt: skip
+            if run.returncode:
+                results.append(
+                    {
+                        "repo": repo,
+                        "result": "adopt failed: " + run.stderr.strip()[-100:],
+                    }
+                )
+                continue
+            (d / ".arch" / "ruff.toml").write_text(VENDOR_RUFF)
+            log = d / ".arch" / "decisions.log"
+            if ADOPT_DECISION not in (log.read_text() if log.is_file() else ""):
+                with open(log, "a") as f:
+                    f.write(f"{ac.today().isoformat()} {ADOPT_DECISION}\n")
+            bp = d / ".arch" / "baseline.json"
+            base = json.loads(bp.read_text())
+            canon = ac.load_canon(d) or {}
+            n = source_count(d)
+            if not canon.get("capabilities") and n > EMPTY_REGISTER_MIN_FILES:
+                base["register_empty"] = n
+                bp.write_text(json.dumps(base, indent=2, sort_keys=True) + "\n")
+            msg = "ci: log the adoption decision, baseline the empty register (SPEC-ARCH-CHECK-FINDS-DUPLICATES-ON-ITS-OWN, Spec: avbos-systems#1286)\n\nCo-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+            failed = None
+            for st in (
+                ["add", "-A"],
+                ["commit", "-q", "-m", msg],
+                ["push", "-q", "origin", BRANCH],
+            ):
+                if subprocess.run(["git", "-C", str(d), *GH_CRED, *st], capture_output=True, check=False).returncode:  # fmt: skip
+                    failed = st[0]
+                    break
+            results.append(
+                {
+                    "repo": repo,
+                    "result": f"git {failed} failed or nothing to change"
+                    if failed
+                    else "refreshed",
+                }
+            )
+    return results
+
+
 def rollout_cli(cmd):
     rows = gap()
     for r in rows:
@@ -377,7 +459,60 @@ def rollout_cli(cmd):
             f"MISSING {r['repo']}: register {'yes' if r['register'] else 'no'}, CI step {'yes' if r['ci'] else 'no'}"
         )
     print(f"{len(rows)} active repositories lack the register or the CI step")
+    if cmd == "refresh":
+        for r in refresh(rows):
+            print(f"{r['repo']}: {r['result']}")
     if cmd == "apply":
         for r in apply(rows):
             print(f"{r['repo']}: {r['result']}")
     return 1 if rows and cmd == "status" else 0
+
+
+def nightly(out_dir=None, now=None):
+    """The nightly list: write who lacks the check and a still-alive ping. Returns the number of gaps."""
+    d = Path(out_dir or Path.home() / "logs")
+    d.mkdir(parents=True, exist_ok=True)
+    rows = gap()
+    stamp = (now or dt.datetime.now().astimezone()).isoformat(timespec="seconds")
+    lines = [
+        f"{r['repo']}: register {'yes' if r['register'] else 'no'}, CI step {'yes' if r['ci'] else 'no'}"
+        for r in rows
+    ]
+    (d / "arch-coverage-nightly.txt").write_text(
+        f"{stamp} {len(rows)} active repositories lack the check\n"
+        + "\n".join(lines)
+        + "\n"
+    )
+    (d / "arch-coverage-nightly.alive").write_text(stamp)  # still-alive ping
+    return len(rows)
+
+
+EMPTY_REGISTER_MIN_FILES = 20
+ADOPT_DECISION = "avbos-systems-1286-1795269465.decisions.json#d1"  # the founder's "open all 33" answer, 21 Nov 2026
+
+
+def source_count(root):
+    return len([f for f in ac.list_files(root) if f.endswith(ac.SOURCE_EXTS)])
+
+
+def check_register(root, canon):
+    """More than 20 source files and nothing registered guards nothing. A repository that adopted with an empty
+    register has it recorded in the baseline: reported as 'ownership not established', and it fails only if the
+    code has doubled since adoption. Anything else fails."""
+    if canon.get("capabilities"):
+        return []
+    n = source_count(root)
+    if n <= EMPTY_REGISTER_MIN_FILES:
+        return []
+    known = ac.load_baseline(root).get("register_empty")
+    msg = f"{n} source files and 0 registered capabilities: the register guards nothing; register the jobs the code repeats"
+    if known and n <= 2 * known:
+        return [
+            sc.violation(
+                "note.ownership",
+                ".arch/canon.yaml",
+                "",
+                f"ownership not established (known at adoption, {known} files): {msg}",
+            )
+        ]
+    return [sc.violation("register.empty", ".arch/canon.yaml", "", msg)]

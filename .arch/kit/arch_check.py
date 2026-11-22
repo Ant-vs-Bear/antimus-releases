@@ -148,26 +148,6 @@ def apply_exceptions(viols, exceptions, today):
     return remaining, covered, sorted(set(notes))
 
 
-EMPTY_REGISTER_MIN_FILES = 20
-
-
-def check_register(root, canon):
-    """A repository with more than 20 source files and nothing registered guards nothing: fail it."""
-    if canon.get("capabilities"):
-        return []
-    n = len([f for f in ac.list_files(root) if f.endswith(ac.SOURCE_EXTS)])
-    if n <= EMPTY_REGISTER_MIN_FILES:
-        return []
-    return [
-        sc.violation(
-            "register.empty",
-            ".arch/canon.yaml",
-            "",
-            f"{n} source files and 0 registered capabilities: the register guards nothing; register the jobs the code repeats",
-        )
-    ]
-
-
 def enforced(rule, enforce):
     return any(rule == e or rule.startswith(e + ".") for e in enforce)
 
@@ -349,7 +329,9 @@ def run_check(
     import arch_gen
 
     new += ax.pending_violations(root)
-    new += check_register(root, canon)
+    import arch_blind
+
+    new += arch_blind.check_register(root, canon)
     if arch_gen.is_stale(root, canon):
         new.append(
             sc.violation(
@@ -485,10 +467,20 @@ def main(argv=None):
     )
     ap.add_argument(
         "--rollout",
-        choices=["status", "apply"],
+        choices=["status", "apply", "refresh"],
         help="list or open held PRs for repositories lacking the check",
     )
+    ap.add_argument(
+        "--nightly",
+        action="store_true",
+        help="write the org-wide list and a still-alive ping",
+    )
     a = ap.parse_args(argv)
+    if a.nightly:
+        import arch_blind
+
+        arch_blind.nightly()
+        return 0
     if a.rollout:
         import arch_blind
 
@@ -573,9 +565,17 @@ def build_baseline(root, canon):
         for f in files
         if legacy and ac.matches(f, legacy) and f.endswith(ac.SOURCE_EXTS)
     }
-    return {
+    base = {
         "version": 1,
         "generated": ac.today().isoformat(),
         "violations": dict(counts(viols)),
         "legacy_files": sizes,
     }
+    import arch_blind
+
+    n = arch_blind.source_count(root)
+    if not canon.get("capabilities") and n > arch_blind.EMPTY_REGISTER_MIN_FILES:
+        base["register_empty"] = (
+            n  # ownership not established at adoption: reported, may not double
+        )
+    return base
