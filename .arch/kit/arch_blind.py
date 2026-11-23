@@ -274,6 +274,18 @@ VENDOR_RUFF = (
 )
 
 
+def write_place_plan(d):
+    """The adoption's own generated files (.lifecycle/) are its place list, so the place check does not fail them."""
+    import json
+
+    pp = Path(d) / ".arch" / "plan.json"
+    plan = json.loads(pp.read_text()) if pp.is_file() else {}
+    place = plan.setdefault("place", [])
+    if ".lifecycle/**" not in place:
+        place.append(".lifecycle/**")
+    pp.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+
+
 def open_pr(repo, runner=gh):
     """True when a pull request from the rollout branch is already open in `repo`."""
     code, out = runner(
@@ -314,6 +326,7 @@ def apply(rows, runner=gh):
                 (d / ".arch" / "ruff.toml").write_text(VENDOR_RUFF)
                 with open(d / ".arch" / "decisions.log", "a") as f:
                     f.write(f"{ac.today().isoformat()} {ADOPT_DECISION}\n")
+                write_place_plan(d)
             if adopted.returncode:
                 results.append(
                     {
@@ -438,6 +451,7 @@ def refresh(rows):
             if ADOPT_DECISION not in (log.read_text() if log.is_file() else ""):
                 with open(log, "a") as f:
                     f.write(f"{ac.today().isoformat()} {ADOPT_DECISION}\n")
+            write_place_plan(d)
             bp = d / ".arch" / "baseline.json"
             base = json.loads(bp.read_text())
             canon = ac.load_canon(d) or {}
