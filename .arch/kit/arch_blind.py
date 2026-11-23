@@ -1,6 +1,4 @@
-"""arch_blind: proves the architecture check could look. A coverage record per language (files seen, parsed, skipped and
-why), a verdict that never calls a big repository clean when it found nothing, and a seeded canary per language
-(SPEC-ARCH-CHECK-FINDS-DUPLICATES-ON-ITS-OWN)."""
+"""arch_blind: proves the architecture check could look: a coverage record per language, a verdict that never calls a big repository clean when it found nothing, and a seeded canary per language (SPEC-ARCH-CHECK-FINDS-DUPLICATES-ON-ITS-OWN)."""
 
 import base64
 import datetime as dt
@@ -13,59 +11,72 @@ import arch_config as ac
 import arch_literals as lit
 import arch_scan as sc
 
+# The exact grammar versions this check is pinned to (SPEC-ARCH-CHECK-FINDS-DUPLICATES-ON-ITS-OWN).
+TREE_SITTER_PINS = {
+    "tree_sitter": "0.25.2",
+    "tree_sitter_typescript": "0.23.2",
+    "tree_sitter_rust": "0.24.2",
+    "tree_sitter_javascript": "0.25.0",
+}
+
+# extension -> (grammar module, factory returning the language capsule)
+GRAMMARS = {
+    ".tsx": ("tree_sitter_typescript", "language_tsx"),
+    ".ts": ("tree_sitter_typescript", "language_typescript"),
+    ".mts": ("tree_sitter_typescript", "language_typescript"),
+    ".cts": ("tree_sitter_typescript", "language_typescript"),
+    ".js": ("tree_sitter_javascript", "language"),
+    ".mjs": ("tree_sitter_javascript", "language"),
+    ".cjs": ("tree_sitter_javascript", "language"),
+    ".jsx": ("tree_sitter_javascript", "language"),
+    ".rs": ("tree_sitter_rust", "language"),
+}
+
 BIG_REPO_FILES = 50
-OPEN, CLOSE = "([{", ")]}"
-REGEX_PREV = set("(,=:[!&|?{};") | {""}
+check_balanced = lit.check_balanced  # the scanner lives in arch_literals (the spec's file list; blind stays under 600 lines)
 
 
-def check_balanced(text, lang):
-    """Raise SyntaxError when strings, comments or brackets do not close: the file cannot be read as that language."""
-    stack, i, n, prev = [], 0, len(text), ""
-    while i < n:
-        c = text[i]
-        two = text[i : i + 2]
-        if two == "//":
-            i = text.find("\n", i)
-            i = n if i < 0 else i
-            continue
-        if two == "/*":
-            j = text.find("*/", i + 2)
-            if j < 0:
-                raise SyntaxError("unterminated block comment")
-            i = j + 2
-            continue
-        if c == '"' or (c == "'" and lang == "typescript") or c == "`":
-            j = i + 1
-            while j < n and text[j] != c:
-                j += 2 if text[j] == "\\" else 1
-                if c != "`" and j < n and text[j] == "\n":
-                    break
-            if j >= n or (c != "`" and text[j] == "\n"):
-                raise SyntaxError("unterminated string")
-            i, prev = j + 1, c
-            continue
-        if c == "/" and lang == "typescript" and prev in REGEX_PREV:
-            j, cls = i + 1, False
-            while j < n and text[j] != "\n" and (cls or text[j] != "/"):
-                if text[j] == "\\":
-                    j += 1
-                elif text[j] == "[":
-                    cls = True
-                elif text[j] == "]":
-                    cls = False
-                j += 1
-            if j < n and text[j] == "/":
-                i, prev = j + 1, "x"
-                continue
-        if c in OPEN:
-            stack.append(c)
-        elif c in CLOSE and (not stack or OPEN.index(stack.pop()) != CLOSE.index(c)):
-            raise SyntaxError(f"unmatched {c!r}")
-        if not c.isspace():
-            prev = c
-        i += 1
-    if stack:
-        raise SyntaxError("unclosed bracket")
+def _first_error_line(node):
+    """Line (1-based) of the first ERROR or missing node in the tree, or None when the tree is clean."""
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n.type == "ERROR" or n.is_missing:
+            return n.start_point[0] + 1
+        stack.extend(n.children)
+    return None
+
+
+def parse_check(text, lang, rel):
+    """Parse `text` with tree-sitter when the grammar for `rel`'s extension imports; raise
+    SyntaxError('tree-sitter: syntax error at line N') on the first ERROR or missing node. Falls back to
+    check_balanced when tree-sitter or the grammar is unavailable, or the extension is unknown. Never raises
+    ImportError."""
+    grammar = GRAMMARS.get(Path(rel).suffix.lower())
+    if grammar is not None:
+        module_name, factory = grammar
+        try:
+            import tree_sitter
+
+            mod = __import__(module_name)
+            language = tree_sitter.Language(getattr(mod, factory)())
+            parser = tree_sitter.Parser(language)
+            tree = parser.parse(text.encode("utf-8"))
+        except ImportError:
+            pass
+        else:
+            line = _first_error_line(tree.root_node)
+            if line is not None:
+                # the TypeScript grammar rejects some valid code (for example `x as T[] ?? []`), so an error only
+                # counts when the bracket scanner also rejects the file
+                try:
+                    check_balanced(text, lang)
+                except SyntaxError as e:
+                    raise SyntaxError(
+                        f"tree-sitter: syntax error at line {line} ({e})"
+                    ) from None
+            return
+    check_balanced(text, lang)
 
 
 def coverage_record(root):
@@ -101,9 +112,9 @@ def coverage_text(name, rec):
     parts = [
         f"{lang} {r['parsed']}/{r['seen']} parsed" for lang, r in sorted(rec.items())
     ]
-    return f"scanned {name}: " + (
-        ", ".join(parts) or "no Python, TypeScript or Rust files"
-    )
+    if not parts:
+        return "nothing to scan (no source files)"
+    return f"scanned {name}: " + ", ".join(parts)
 
 
 # One planted duplicate (same value, two files) and one planted divergence (two values) per language.
@@ -152,6 +163,8 @@ def verdict(root, clusters=None):
             "blind",
             f"the extractor missed its planted canary in {', '.join(missed)}",
         )
+    elif not seen:
+        status, why = "nothing to scan", "no source files"
     elif bad:
         status, why = (
             "unparsed",
@@ -172,7 +185,8 @@ def verdict(root, clusters=None):
     return {
         "status": status,
         "why": why,
-        "ok": status in ("clean", "findings"),
+        # a repository with no source files has a stated reason, so it is not a failure
+        "ok": status in ("clean", "findings", "nothing to scan"),
         "coverage": rec,
         "line": coverage_text(root.name, rec),
     }

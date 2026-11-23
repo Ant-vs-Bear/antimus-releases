@@ -163,7 +163,7 @@ def parse_touches(text):
         if not m:
             continue
         for x in m.group(1).split(","):
-            x = x.strip().strip("`")
+            x = re.sub(r"\s*\([^)]*\)\s*$", "", x.strip()).strip("`")  # "path (new)"
             if not x:
                 continue
             out.append(x)

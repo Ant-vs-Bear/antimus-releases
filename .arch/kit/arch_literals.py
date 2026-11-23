@@ -186,6 +186,136 @@ NUM_EXPR = re.compile(
 )
 
 
+# bracket/string/comment balance scan for TypeScript and Rust; arch_blind re-exports it
+OPEN, CLOSE = "([{", ")]}"
+REGEX_PREV = set("(,=:[!&|?{;") | {
+    ""
+}  # no "}": in JSX `{a}/{b}` the slash is text, not a regex
+
+
+def _skip_string(text, i, quote):
+    """Index just past a quoted string that starts at `i` (text[i] == quote), or None when it does not close on the
+    same line. Backslash escapes are honoured."""
+    n = len(text)
+    j = i + 1
+    while j < n and text[j] != quote:
+        if text[j] == "\\":
+            j += 2
+            continue
+        if text[j] == "\n":
+            return None
+        j += 1
+    if j >= n or text[j] != quote:
+        return None
+    return j + 1
+
+
+def _skip_regex(text, i):
+    """Index just past a regex literal that starts at `i` (text[i] == '/'), or None when it does not close on the
+    same line."""
+    n = len(text)
+    j, cls = i + 1, False
+    while j < n and text[j] != "\n" and (cls or text[j] != "/"):
+        if text[j] == "\\":
+            j += 1
+        elif text[j] == "[":
+            cls = True
+        elif text[j] == "]":
+            cls = False
+        j += 1
+    if j < n and text[j] == "/":
+        return j + 1
+    return None
+
+
+def check_balanced(text, lang):
+    """Raise SyntaxError when strings, comments or brackets do not close: the file cannot be read as that language.
+    Template literals are tracked with a stack so ${...} expressions are scanned as code; a single quote that does
+    not close on its line is JSX text, not a string; '/' is a regex only after REGEX_PREV and never after '<' or
+    before '>'."""
+    stack, i, n, prev = [], 0, len(text), ""
+    while i < n:
+        c = text[i]
+        two = text[i : i + 2]
+        if stack and stack[-1] == "template":
+            # inside a template literal: only ` closes it, ${ opens an expression
+            if c == "\\" and i + 1 < n:
+                # skip the escaped character; a dangling backslash falls through and the
+                # unterminated template is reported as an unclosed bracket
+                i += 2
+                continue
+            if c == "`":
+                stack.pop()
+                i, prev = i + 1, "`"
+                continue
+            if two == "${":
+                stack.append("expr")
+                i, prev = i + 2, "{"
+                continue
+            i += 1
+            continue
+        if two == "//":
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if two == "/*":
+            j = text.find("*/", i + 2)
+            if j < 0:
+                raise SyntaxError("unterminated block comment")
+            i = j + 2
+            continue
+        if c == "`":
+            stack.append("template")
+            i, prev = i + 1, "`"
+            continue
+        if c == '"':
+            end = _skip_string(text, i, c)
+            if end is None:
+                raise SyntaxError("unterminated string")
+            i, prev = end, c
+            continue
+        if c == "'" and lang == "typescript":
+            # JSX text: an apostrophe inside a word (don't) is text, not a string. Only the
+            # character immediately before it decides, so a string after a keyword or a space
+            # (return 'a(b') is still read as a string and its brackets are not scanned.
+            if i and (text[i - 1].isalnum() or text[i - 1] == "_"):
+                i, prev = i + 1, c
+                continue
+            end = _skip_string(text, i, c)
+            if end is not None:
+                i, prev = end, c
+            else:
+                i, prev = i + 1, c
+            continue
+        if (
+            c == "/"
+            and lang == "typescript"
+            and prev in REGEX_PREV
+            and prev != "<"
+            and not (i + 1 < n and text[i + 1] == ">")
+        ):
+            end = _skip_regex(text, i)
+            if end is not None:
+                i, prev = end, "x"
+                continue
+        if c in OPEN:
+            stack.append(c)
+        elif c in CLOSE:
+            if not stack:
+                raise SyntaxError(f"unmatched {c!r}")
+            top = stack.pop()
+            if top == "expr":
+                if c != "}":
+                    raise SyntaxError(f"unmatched {c!r}")
+            elif top in OPEN and OPEN.index(top) != CLOSE.index(c):
+                raise SyntaxError(f"unmatched {c!r}")
+        if not c.isspace():
+            prev = c
+        i += 1
+    if stack:
+        raise SyntaxError("unclosed bracket")
+
+
 def tokens(name):
     """Name -> list of lower-case words (snake and camel case)."""
     name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name.replace("$", "_"))
@@ -373,9 +503,11 @@ def extract_file(root, rel, lang):
     if "\0" in text:
         raise ValueError("binary content")
     if lang != "python":
+        # lazy import: arch_blind imports arch_literals at module level, so importing it here
+        # (inside the function) avoids a circular import at load time
         import arch_blind
 
-        arch_blind.check_balanced(text, lang)
+        arch_blind.parse_check(text, lang, rel)
     return EXTRACTORS[lang](text, rel)
 
 
