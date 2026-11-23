@@ -421,6 +421,30 @@ def extract_all(here, out=print):
     return 1 if bad else 0
 
 
+def merge_default(d, repo, runner=gh):
+    """Merge the repository's default branch into the checked-out install branch, so the generated docs are checked
+    against what the pull request will really merge into. Returns an error text, or None when merged or up to date."""
+    code, out = runner("api", f"repos/{ORG}/{repo}", "--jq", ".default_branch")
+    base = out.strip()
+    if code or not base:
+        return "could not read the default branch"
+    git = [
+        "git",
+        "-C",
+        str(d),
+        "-c",
+        "user.name=arch-kit rollout",
+        "-c",
+        "user.email=noreply@anthropic.com",
+    ]
+    if subprocess.run([*git, "fetch", "-q", "origin", base], capture_output=True, check=False).returncode:  # fmt: skip
+        return "fetch of the default branch failed"
+    if subprocess.run([*git, "merge", "-q", "--no-edit", f"origin/{base}"], capture_output=True, check=False).returncode:  # fmt: skip
+        subprocess.run([*git, "merge", "--abort"], capture_output=True, check=False)
+        return "merge conflict with the default branch: left alone"
+    return None
+
+
 def refresh(rows):
     """Bring each open rollout branch up to the current kit: decision logged, empty register baselined, kit synced.
     Plain pushes onto the branch of the open held PR; never merges. Returns [{repo, result}]."""
@@ -434,8 +458,12 @@ def refresh(rows):
             continue
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp) / repo
-            if subprocess.run(["git", "clone", "-q", "--depth", "1", "-b", BRANCH, f"https://github.com/{ORG}/{repo}.git", str(d)], capture_output=True, check=False).returncode:  # fmt: skip
+            if subprocess.run(["git", "clone", "-q", "-b", BRANCH, f"https://github.com/{ORG}/{repo}.git", str(d)], capture_output=True, check=False).returncode:  # fmt: skip
                 results.append({"repo": repo, "result": "clone failed"})
+                continue
+            merged = merge_default(d, repo)
+            if merged:
+                results.append({"repo": repo, "result": merged})
                 continue
             run = subprocess.run([sys.executable, str(KIT / "arch_kit.py"), "adopt"], cwd=d, capture_output=True, text=True, check=False)  # fmt: skip
             if run.returncode:
