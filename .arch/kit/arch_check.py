@@ -21,6 +21,7 @@ AUTO_PLACE = [
     "**/*.test.*",
     "**/*.spec.*",
     ".arch/**",
+    ".lifecycle/**",
     ".aider.conf.yml",
     ".github/workflows/arch.yml",
     "e2e/**",
