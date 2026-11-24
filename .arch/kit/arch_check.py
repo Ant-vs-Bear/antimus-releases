@@ -492,12 +492,12 @@ def main(argv=None):
         else "."
     )
     if a.extract:
-        import arch_blind
+        import arch_extract
 
         return (
-            arch_blind.extract_all(here)
+            arch_extract.extract_all(here)
             if a.coverage_all
-            else arch_blind.extract_one(here)
+            else arch_extract.extract_one(here)
         )
     if a.coverage_all:
         coverage_all(here)

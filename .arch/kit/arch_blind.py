@@ -195,6 +195,7 @@ def verdict(root, clusters=None):
 # --- every active repository of the organisation: who lacks the register or the CI step, and the held rollout PRs ---
 ORG = "Ant-vs-Bear"
 ACTIVE_DAYS = 60
+WORKERS = 8
 BRANCH = "chore/arch-check"
 KIT = Path(__file__).resolve().parent
 GH_CRED = [
@@ -260,12 +261,22 @@ def has_ci_step(repo, runner=gh):
 
 def gap(repos=None, runner=gh):
     """Active repositories that lack the register or the CI step: [{repo, register, ci}]."""
-    out = []
-    for repo in repos if repos is not None else active_repos(runner):
-        reg, ci = has_register(repo, runner), has_ci_step(repo, runner)
-        if not (reg and ci):
-            out.append({"repo": repo, "register": reg, "ci": ci})
-    return out
+    from concurrent.futures import ThreadPoolExecutor
+
+    names = list(repos if repos is not None else active_repos(runner))
+
+    def look(repo):
+        return {
+            "repo": repo,
+            "register": has_register(repo, runner),
+            "ci": has_ci_step(repo, runner),
+        }
+
+    with ThreadPoolExecutor(
+        WORKERS
+    ) as pool:  # about 100 API calls: in parallel, order kept
+        rows = list(pool.map(look, names))
+    return [r for r in rows if not (r["register"] and r["ci"])]
 
 
 VENDOR_RUFF = (
@@ -375,50 +386,6 @@ def apply(rows, runner=gh):
                 }
             )
     return results
-
-
-def extract_one(root, out=print):
-    """Coverage per language, the honest verdict, the clusters, and the ratchet result. Returns 0 only when all is well."""
-    import arch_literals
-    import arch_ratchet
-
-    clusters = arch_literals.cluster(arch_literals.extract(root))
-    v = verdict(root, clusters)
-    out(v["line"])
-    out(f"{Path(root).name}: {v['status']} ({v['why']})")
-    for c in clusters[:15]:
-        out("  " + arch_literals.report_line(c))
-    fails = arch_ratchet.run(root, clusters, write=False)
-    for f in fails:
-        out("  FAIL " + f)
-    return 0 if v["ok"] and not fails else 1
-
-
-def extract_all(here, out=print):
-    import arch_check
-
-    """Every active repository of the organisation: who lacks the register or CI step, then each one's honest verdict."""
-
-    try:
-        names = active_repos()
-    except RuntimeError:
-        names = arch_check.COVERAGE_REPOS
-    gaps = gap(names) if names is not arch_check.COVERAGE_REPOS else []
-    for g in gaps:
-        out(
-            f"MISSING {g['repo']}: register {'yes' if g['register'] else 'no'}, CI step {'yes' if g['ci'] else 'no'}"
-        )
-    out(
-        f"{len(gaps)} of {len(names)} active repositories lack the register or the CI step"
-    )
-    bad = len(gaps)
-    for name in names:
-        try:
-            bad += extract_one(arch_check.repo_path(name, here), out) != 0
-        except (RuntimeError, OSError, ValueError) as e:  # reported, never called clean
-            out(f"{name}: could not be scanned ({e})")
-            bad += 1
-    return 1 if bad else 0
 
 
 def merge_default(d, repo, runner=gh):
