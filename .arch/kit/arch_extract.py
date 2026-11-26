@@ -12,7 +12,7 @@ warnings.filterwarnings(
 
 
 def extract_one(root, out=print):
-    """Coverage per language, the honest verdict, the clusters, and the ratchet result. Returns 0 only when all is well."""
+    """Coverage per language, the honest verdict, the clusters, and the ratchet result. Returns 0 when all is well or the repository is honestly reported "ownership not established"."""
     import arch_literals
     import arch_ratchet
 
@@ -25,7 +25,10 @@ def extract_one(root, out=print):
     fails = arch_ratchet.run(root, clusters, write=False)
     for f in fails:
         out("  FAIL " + f)
-    return 0 if v["ok"] and not fails else 1
+    reported = (
+        v["status"] == "ownership not established"
+    )  # an honest, reasoned report, shown and never called clean
+    return 0 if (v["ok"] or reported) and not fails else 1
 
 
 def _scan(job):

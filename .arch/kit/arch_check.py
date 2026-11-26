@@ -322,6 +322,11 @@ def run_check(
     new = beyond_baseline(viols, baseline) + legacy_violations(
         root, files, canon, baseline
     )
+    import arch_ratchet
+
+    problems = arch_ratchet.baseline_problems(baseline, today)
+    n_new = len(new)
+    new += arch_ratchet.expired_violations(problems)
     if touched:
         added, mod = ac.changed_files(root, ac.base_ref(root, base))
         t = set(added) | set(mod)
@@ -350,13 +355,16 @@ def run_check(
     remaining, covered, notes = apply_exceptions(new, ac.load_exceptions(root), today)
     enforce = (
         set(canon["enforce"])
-        | {"register", "dup.literal"}
+        | {"register", "dup.literal", "baseline.expired"}
         | ({"canon", "dup", "loose", "layer", "legacy"} if strict else set())
     )
     failing = [v for v in remaining if enforced(v["rule"], enforce)]
     warns = [v for v in remaining if v not in failing]
     import arch_jobs
 
+    failing, warns = __import__("arch_ratchet").promote_bans(
+        root, canon, failing, warns, base
+    )
     return {
         "ok": not failing,
         "coverage": arch_jobs.coverage(root),
@@ -367,6 +375,9 @@ def run_check(
         "baselined": sum(counts(viols).values())
         - len(beyond_baseline(viols, baseline)),
         "covered": len(covered),
+        "counts": arch_ratchet.counts_block(
+            n_new, len(viols) - len(beyond_baseline(viols, baseline)), problems
+        ),
     }
 
 
@@ -382,6 +393,8 @@ def format_result(res, limit=15):
         if len(items) > limit:
             lines.append(f"  ... and {len(items) - limit} more {tag}")
     lines += [f"  note: {n}" for n in res.get("notes", [])]
+    if res.get("counts"):
+        lines.append(__import__("arch_ratchet").counts_line(res["counts"]))
     if res.get("coverage"):
         import arch_jobs
 
@@ -537,9 +550,11 @@ def tighten(root, rules, ref):
     """Make `rules` blocking: record today's violations of them as known (so only new ones fail), add them to
     `enforce`, and log the resolved decision that authorised it. Refuses without a resolved decision."""
     root = Path(root)
-    if ac.resolve_decision_ref(ref) is None:
+    if ac.decision_state(ref) != "tapped":
+        raise ValueError(ac.decision_error(ref))
+    if any(r.startswith(("canon.", "transition.")) for r in rules):
         raise ValueError(
-            f"decision {ref!r} is not a resolved decision on the decisions page"
+            "ownership and transition violations cannot be baselined: fix them"
         )
     canon = ac.load_canon(root)
     baseline = ac.load_baseline(root)

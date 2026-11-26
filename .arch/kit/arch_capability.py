@@ -41,3 +41,22 @@ def add_capability(root, name, canonical, bans, allow, note, decision):
     ac.save_yaml(ac.arch_path(root, "canon.yaml"), canon)
     ac.log_decision(root, decision)
     return [".arch/canon.yaml", ".arch/decisions.log", *arch_gen.gen(root)]
+
+
+def set_symptoms(root, name, symptoms, decision):
+    """Give an existing capability the phrases people use for its failures (find-job reads them). Same decision rule as add."""
+    canon = ac.load_canon(root)
+    if canon is None:
+        raise ValueError("this repo has not adopted the architect")
+    if name not in canon["capabilities"]:
+        raise ValueError(f"capability {name!r} does not exist")
+    if not symptoms:
+        raise ValueError("give at least one --symptom phrase")
+    if ac.resolve_decision_ref(decision) is None:
+        raise ValueError(
+            f"decision {decision!r} is not a resolved decision on the decisions page"
+        )
+    canon["capabilities"][name]["symptoms"] = list(symptoms)
+    ac.save_yaml(ac.arch_path(root, "canon.yaml"), canon)
+    ac.log_decision(root, decision)
+    return [".arch/canon.yaml", ".arch/decisions.log", *arch_gen.gen(root)]

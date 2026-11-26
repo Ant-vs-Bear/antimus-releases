@@ -20,6 +20,7 @@ arch_kit.py lifecycle check [--base REF] [--json] | gen   superseded-code record
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -70,9 +71,10 @@ def build_parser():
     sb = sub.add_parser("spec-block")
     sb.add_argument("spec")
     cp = sub.add_parser("capability")
-    cp.add_argument("action", choices=["add"])
+    cp.add_argument("action", choices=["add", "symptoms"])
     cp.add_argument("name")
-    cp.add_argument("--canonical", required=True)
+    cp.add_argument("--canonical")
+    cp.add_argument("--symptom", action="append", default=[])
     cp.add_argument("--ban", action="append", default=[])
     cp.add_argument("--allow", action="append", default=[])
     cp.add_argument("--note", default="")
@@ -109,8 +111,96 @@ def cmd_check(root, a):
         policy=a.policy,
         strict=a.strict,
     )
+    res = repair_check(root, res, a.base, quiet=a.json)
     print(json.dumps(res, indent=1) if a.json else ck.format_result(res))
     return 0 if res["ok"] else 1
+
+
+def branch_spec(root, base):
+    """The one spec named in the branch's commit messages, read from base else HEAD."""
+    log = ac.git(root, "log", "--format=%B", f"{base}..HEAD")
+    names = []
+    for m in re.finditer(ck.SPEC_NAME_RE, log):
+        name = m.group(1) if m.groups() else m.group(0)
+        if name not in names:
+            names.append(name)
+    for p in sorted((Path(root) / "docs/specs").glob("*.md")):
+        if p.stem in log and p.stem not in names:
+            names.append(p.stem)
+    for name in names:
+        rel = f"docs/specs/{name}.md"
+        text = ac.git(root, "show", f"{base}:{rel}")
+        if not text.strip():
+            text = ac.git(root, "show", f"HEAD:{rel}")
+        if not text.strip():
+            p = Path(root) / rel
+            text = p.read_text() if p.exists() else ""
+        if text.strip():
+            return name, text
+    return (names[0] if names else None), ""
+
+
+def branch_lines(root, base):
+    """Lines added and removed over the branch, ignoring docs, evidence and tests."""
+    added = removed = 0
+    for line in ac.git(root, "diff", "--numstat", f"{base}...HEAD").splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        a, r, path = parts
+        if path.startswith("docs/") or "spec-evidence" in path:
+            continue
+        if Path(path).name.startswith("test_"):
+            continue
+        added += int(a) if a.isdigit() else 0
+        removed += int(r) if r.isdigit() else 0
+    return added, removed
+
+
+def spec_budget(text):
+    """The number of lines a spec's Budget line allows, or None."""
+    m = re.search(r"^Budget:.*?(\d+)\s+lines", text, re.MULTILINE)
+    return int(m.group(1)) if m else None
+
+
+def spec_retires(text):
+    """The registered capability names a spec's Retires line lists."""
+    m = re.search(r"^Retires:\s*(.+)$", text, re.MULTILINE)
+    return [n.strip() for n in m.group(1).split(",") if n.strip()] if m else []
+
+
+def repair_check(root, res, base, quiet=False):
+    """RP-03: a repair spec must name what it retires and stay inside its budget."""
+    if not base:
+        return res
+    added, removed = branch_lines(root, base)
+    if not quiet:
+        print(f"net lines: +{added} -{removed} = {added - removed}")
+    name, text = branch_spec(root, base)
+    if not text:
+        return res
+    retired = spec_retires(text)
+    kept = []
+    for v in res.get("failing", []):
+        hit = next((n for n in retired if v.get("rule") == f"canon.{n}"), None)
+        if hit:
+            if not quiet:
+                print(f"retired by spec: {hit}")
+            continue
+        kept.append(v)
+    res["failing"] = kept
+    budget = spec_budget(text)
+    if budget is not None and added > budget and "Over budget because:" not in text:
+        res["failing"].append(
+            {
+                "rule": "repair.budget",
+                "path": f"docs/specs/{name}.md",
+                "target": "",
+                "detail": f"budget {budget} lines, added {added}",
+            }
+        )
+    res["ok"] = not res["failing"]
+    return res
 
 
 def cmd_plan(root, a):
@@ -158,6 +248,22 @@ def cmd_digest(root, a):
             print("card:", dg.digest_card(r, hist))
 
 
+def cmd_capability(root, a):
+    try:
+        written = (
+            cap.set_symptoms(root, a.name, a.symptom, a.decision)
+            if a.action == "symptoms"
+            else cap.add_capability(
+                root, a.name, a.canonical, a.ban, a.allow, a.note, a.decision
+            )
+        )
+    except ValueError as error:
+        print(f"refused: {error}")
+        return 1
+    print("\n".join(written))
+    return 0
+
+
 def main(argv=None):
     a = build_parser().parse_args(argv)
     if a.cmd == "hook":
@@ -177,14 +283,7 @@ def main(argv=None):
             "\n".join(sv.adopt(root, a.answers)) or "already adopted: nothing to write"
         )
     elif a.cmd == "capability":
-        try:
-            written = cap.add_capability(
-                root, a.name, a.canonical, a.ban, a.allow, a.note, a.decision
-            )
-        except ValueError as error:
-            print(f"refused: {error}")
-            return 1
-        print("\n".join(written))
+        return cmd_capability(root, a)
     elif a.cmd == "move":
         try:
             message, written = mv.record_move(root, a.decision, a.base)

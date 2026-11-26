@@ -1,8 +1,8 @@
 """arch_hooks: edit-time and stop-time behaviour (SPEC-CHIEF-ARCHITECT sections 5.5, 5.8, 5.11).
 
-Block exactly three things at edit time (a new file under a legacy path, a new import from new code into legacy, growth of a
-legacy file) plus writes to the policy files; everything else is a warning, capped at three rules. `file_findings` is the one
-function used by the Claude Code hooks AND by the Aider mirror (`arch-kit edit-check`), so both get identical results.
+Block a new file under a legacy path, a new import from new code into legacy, growth of a legacy file, a new unbaselined line
+banned by a registered job (unless the canon sets `ban_mode: warn`), and writes to the policy files; everything else is a
+warning, capped at three rules. `file_findings` is the one function used by the hooks AND the Aider mirror, so both match.
 Every entry point fails open on its own errors and does nothing in a repo without .arch/canon.yaml.
 """
 
@@ -160,7 +160,7 @@ def file_findings(root, canon, rel, text, exists=None):
                     out.append(
                         {
                             "rule": f"canon.{cap}",
-                            "blocking": False,
+                            "blocking": canon.get("ban_mode") != "warn",
                             "line": line_no,
                             "message": f"{rel}:{line_no}: '{pat}' is banned for {cap}; use {hint}",
                         }

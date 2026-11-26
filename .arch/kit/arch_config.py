@@ -11,6 +11,8 @@ Per repo, under .arch/:
 
 import datetime as dt
 import functools
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -223,6 +225,50 @@ def resolve_decision_ref(ref):
     return None
 
 
+def tap_key_path():
+    return Path.home() / ".config" / "avb-decisions" / "tap.key"
+
+
+def _tap_sig(name, did, answer, create=False):
+    """HMAC over file name, decision id and answer, or None when there is no key (a missing key never signs)."""
+    kp = tap_key_path()
+    if not kp.is_file():
+        if not create:
+            return None
+        kp.parent.mkdir(parents=True, exist_ok=True)
+        kp.write_bytes(os.urandom(32))
+        kp.chmod(0o600)
+    msg = json.dumps([name, did, answer], sort_keys=True).encode()
+    return hmac.new(kp.read_bytes(), msg, hashlib.sha256).hexdigest()
+
+
+def tap_decisions(data, name):
+    """Called by the decisions-page server when a person submits: marks each answered decision as tapped."""
+    data["tap"] = {
+        d["id"]: _tap_sig(name, d["id"], d.get("answer"), create=True)
+        for d in data.get("decisions", [])
+        if d.get("answer")
+    }
+    return data
+
+
+def decision_state(ref):
+    """'tapped' (carries the page's mark), 'relayed' (resolved with no valid mark: written by an agent), or 'missing'."""
+    d = resolve_decision_ref(ref)
+    if d is None:
+        return "missing"
+    name, _, did = ref.partition("#")
+    sig = ((load_json(decisions_dir() / name) or {}).get("tap") or {}).get(did)
+    want = _tap_sig(name, did, d.get("answer"))
+    return "tapped" if sig and want and hmac.compare_digest(sig, want) else "relayed"
+
+
+def decision_error(ref):
+    if decision_state(ref) == "relayed":
+        return f"decision {ref!r} is relayed, not tapped: it needs one tap on the decisions page"
+    return f"decision {ref!r} is not a resolved decision on the decisions page"
+
+
 def decision_refs_logged(root):
     p = arch_path(root, "decisions.log")
     return (
@@ -233,10 +279,8 @@ def decision_refs_logged(root):
 
 
 def log_decision(root, ref):
-    if resolve_decision_ref(ref) is None:
-        raise ValueError(
-            f"decision {ref!r} is not a resolved decision on the decisions page"
-        )
+    if decision_state(ref) != "tapped":
+        raise ValueError(decision_error(ref))
     p = arch_path(root, "decisions.log")
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a") as f:
