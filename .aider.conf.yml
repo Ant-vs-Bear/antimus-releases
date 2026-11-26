@@ -1,0 +1,6 @@
+read:
+  - docs/ARCHITECTURE.md
+  - .arch/canon.yaml
+lint-cmd: "python3 .arch/kit/arch_kit.py edit-check"
+test-cmd: "python3 .arch/kit/arch_kit.py check"
+auto-lint: true

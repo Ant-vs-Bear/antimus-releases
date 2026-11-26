@@ -1,0 +1,32 @@
+version: 1
+stack: python
+roots: []
+ignore: []
+aliases: {}
+loose:
+  flat_dirs: []
+capabilities: {}
+layers: {}
+enforce:
+- legacy.new-file
+- layer.new-to-legacy
+- legacy.growth
+- gen.stale
+- policy
+- pending.awaiting
+- place
+- exception.expired
+dup:
+  min_tokens: 60
+  ignore_names:
+  - '**/route.ts'
+  - '**/route.js'
+  - '**/page.tsx'
+  - '**/page.ts'
+  - '**/layout.tsx'
+  - '**/*.test.*'
+  - '**/*.spec.*'
+  - '**/__tests__/**'
+  - tests/**
+  - '**/migrations/**'
+  - '**/*.d.ts'

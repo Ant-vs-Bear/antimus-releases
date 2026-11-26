@@ -1,0 +1,20 @@
+# Installed by arch-kit adopt. Runs the architecture check on every pull request.
+# Make this job a REQUIRED status check in the default-branch ruleset (the org is on the Team plan).
+# Add your own ruff/pytest steps in a separate workflow or below (see SPEC-OPS-GUARDRAILS).
+name: architecture
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+jobs:
+  arch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - run: python3 .arch/kit/arch_kit.py check --places --policy
